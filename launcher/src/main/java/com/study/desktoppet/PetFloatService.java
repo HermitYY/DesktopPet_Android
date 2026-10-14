@@ -19,6 +19,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
@@ -26,9 +27,10 @@ import android.widget.FrameLayout;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.ArrayDeque;
 
 /**
- * 全屏透明 Unity 桌宠悬浮窗，但<strong>窗口框等于宠物包围盒</strong>。
+ * 全屏透明 Unity 桌宠悬浮窗，但<strong>窗口框只覆盖宠物及稳定边距</strong>。
  *
  * <p>为什么不能继续 MATCH_PARENT + FLAG_NOT_TOUCHABLE：
  * Unity 透视相机必须铺满屏幕，窗口却不能铺满屏幕。Android 12+ 的 untrusted
@@ -37,9 +39,11 @@ import java.lang.reflect.Proxy;
  *
  * <p>做法：
  * <ul>
- *   <li>WindowManager 窗口的 x/y/width/height = Unity 送来的碰撞体屏幕矩形，不加边框。</li>
+ *   <li>WindowManager 窗口只覆盖 Unity 送来的碰撞体屏幕矩形及稳定边距。</li>
  *   <li>Unity 视图始终按整块屏幕像素测量，再用负偏移对齐，透视相机和 Screen 尺寸不变。</li>
- *   <li>按下时把窗口临时铺满，避免拖动时手指离开包围盒丢 MOVE；抬起后再裁回去。</li>
+ *   <li>点击按下不改变窗口；拖动或多指操作时切到全屏，期间不再追着模型改窗口。</li>
+ *   <li>全屏布局完成后才转发移动事件，抬手后恢复最新宠物区域。</li>
+ *   <li>触摸显式转换为屏幕坐标，窗口移动不会改变 Unity 收到的手指位置。</li>
  * </ul>
  *
  * <p>由 Unity {@code PetTouchAreaProvider} 调用
@@ -70,6 +74,7 @@ public class PetFloatService extends Service {
     private boolean applyScheduled;
 
     private final Rect petRect = new Rect();
+    // 缓存 Unity 原始坐标，重放时只能缩放一次。
     private int lastX = Integer.MIN_VALUE;
     private int lastY;
     private int lastW;
@@ -78,8 +83,17 @@ public class PetFloatService extends Service {
     private int lastUnityH;
 
     private boolean gestureActive;
+    private boolean fullScreenGesture;
     private boolean unityReady;
     private boolean windowOnScreen;
+
+    private void traceInput(String stage) {
+        Log.i(TAG, stage + " active=" + gestureActive + " full=" + fullScreenGesture
+                + " ready=" + (floatView != null && floatView.fullScreenLayoutReady)
+                + " queued=" + (floatView == null ? 0 : floatView.deferredTouchEvents.size())
+                + " frame=" + (windowParams == null ? "none" : windowParams.x + ","
+                + windowParams.y + "," + windowParams.width + "," + windowParams.height));
+    }
 
     private static final int WINDOW_PAD = 64;
     private static final int STABLE_SLACK = 32;
@@ -177,14 +191,7 @@ public class PetFloatService extends Service {
         windowParams.x = 0;
         windowParams.y = 0;
         windowParams.windowAnimations = 0;
-        if (Build.VERSION.SDK_INT >= 34) {
-        }
-        try {
-            java.lang.reflect.Field f =
-                    WindowManager.LayoutParams.class.getField("privateFlags");
-            f.setInt(windowParams, f.getInt(windowParams) | 0x00000040); // NO_MOVE_ANIMATION
-        } catch (Exception ignored) {
-        }
+        disableWindowMoveAnimation();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             windowParams.layoutInDisplayCutoutMode =
@@ -224,9 +231,31 @@ public class PetFloatService extends Service {
         floatView.post(this::flushPendingTouchArea);
     }
 
+    private void disableWindowMoveAnimation() {
+        if (Build.VERSION.SDK_INT >= 34) {
+            try {
+                // API 34 的公开接口；使用反射兼容当前 compileSdkVersion 33。
+                WindowManager.LayoutParams.class
+                        .getMethod("setCanPlayMoveAnimation", boolean.class)
+                        .invoke(windowParams, false);
+                Log.i(TAG, "Window move animation disabled via public API");
+                return;
+            } catch (Exception e) {
+                Log.w(TAG, "Public window move animation API failed", e);
+            }
+        }
+        try {
+            java.lang.reflect.Field f =
+                    WindowManager.LayoutParams.class.getField("privateFlags");
+            f.setInt(windowParams, f.getInt(windowParams) | 0x00000040);
+        } catch (Exception e) {
+            Log.w(TAG, "Could not disable legacy window move animation", e);
+        }
+    }
+
     /**
      * Unity 坐标已经换成 Android 左上角原点，单位是像素。
-     * 碰撞体本身已留空，这里不再加边框。
+     * Android 端再加稳定边距，减少动作引起的频繁窗口更新。
      */
     public static void updatePetTouchArea(int x, int y, int width, int height) {
         updatePetTouchArea(x, y, width, height, 0, 0);
@@ -300,10 +329,21 @@ public class PetFloatService extends Service {
         }
     }
 
-    // 替换 PetFloatService.java 中的 applyTouchArea 方法
     private void applyTouchArea(
             int x, int y, int width, int height, int unityW, int unityH) {
         if (!unityReady || floatView == null || windowParams == null) {
+            return;
+        }
+
+        lastX = x;
+        lastY = y;
+        lastW = width;
+        lastH = height;
+        lastUnityW = unityW;
+        lastUnityH = unityH;
+
+        // 全屏手势期间只缓存最新区域。Unity 可以立即移动，窗口无需逐帧追赶。
+        if (fullScreenGesture) {
             return;
         }
 
@@ -319,42 +359,29 @@ public class PetFloatService extends Service {
             height = Math.round(height * sy);
         }
 
-        lastX = x;
-        lastY = y;
-        lastW = width;
-        lastH = height;
-        lastUnityW = unityW;
-        lastUnityH = unityH;
-
-        if (gestureActive) {
-            return;
-        }
-
         if (width <= 0 || height <= 0) {
-            hidePetWindow();
+            if (!gestureActive) hidePetWindow();
             return;
         }
 
         Rect clipped = new Rect(x, y, x + width, y + height);
         if (!clipped.intersect(0, 0, displayWidth, displayHeight) || clipped.isEmpty()) {
-            hidePetWindow();
+            if (!gestureActive) hidePetWindow();
             return;
         }
 
         Rect padded = new Rect(clipped);
         padded.inset(-WINDOW_PAD, -WINDOW_PAD);
         if (!padded.intersect(0, 0, displayWidth, displayHeight) || padded.isEmpty()) {
-            hidePetWindow();
+            if (!gestureActive) hidePetWindow();
             return;
         }
 
-        // 【修改点 1】：只有在微小抖动且尺寸变化不显著时才 Slack 拦截
-        // 如果新外框显著小于当前 petRect（缩小操作），必须强制更新窗口，不能 Return！
+        // 微小变化可复用当前窗口，明显缩小时仍需更新。
         int dw = Math.abs(padded.width() - petRect.width());
         int dh = Math.abs(padded.height() - petRect.height());
 
-        // 只有实际窗口仍与缓存的宠物区域一致时才允许跳过更新。
-        // 手势期间窗口会扩大到全屏，抬手后必须重新提交宠物区域。
+        // 只有窗口参数仍与缓存的宠物区域一致时才允许跳过更新。
         boolean windowMatchesPetRect = windowParams.x == petRect.left
                 && windowParams.y == petRect.top
                 && windowParams.width == petRect.width()
@@ -371,10 +398,6 @@ public class PetFloatService extends Service {
 
         petRect.set(padded);
         commitWindowFrame(padded.left, padded.top, padded.width(), padded.height(), true);
-    }
-
-    private int slack(boolean hasRoom) {
-        return hasRoom ? STABLE_SLACK : 0;
     }
 
     private void hidePetWindow() {
@@ -404,7 +427,6 @@ public class PetFloatService extends Service {
                 && windowParams.width == width
                 && windowParams.height == height
                 && windowParams.flags == flags) {
-            layoutUnityView();
             return;
         }
 
@@ -413,6 +435,8 @@ public class PetFloatService extends Service {
         windowParams.width = width;
         windowParams.height = height;
         windowParams.flags = flags;
+
+        traceInput("window-request");
 
         try {
             if (windowOnScreen) {
@@ -424,55 +448,28 @@ public class PetFloatService extends Service {
         layoutUnityView();
     }
 
-    private void setGestureActive(boolean active) {
-        if (gestureActive == active) {
-            return;
-        }
-        gestureActive = active;
-        if (active) {
-            commitWindowFrame(0, 0, displayWidth, displayHeight, true);
-        } else if (lastX != Integer.MIN_VALUE) {
+    private final Runnable endGestureRunnable = () -> {
+        traceInput("gesture-end");
+        gestureActive = false;
+        fullScreenGesture = false;
+        if (floatView != null) floatView.fullScreenLayoutReady = false;
+        if (lastX != Integer.MIN_VALUE) {
             applyTouchArea(lastX, lastY, lastW, lastH, lastUnityW, lastUnityH);
-        } else {
-            hidePetWindow();
         }
-    }
+    };
 
-    private final int[] screenLoc = new int[2];
-
-    // 【修改点 2】：修正 ClipBounds 为 View 的 Local 坐标
+    // 这里只请求布局。updateViewLayout 返回后，屏幕位置/窗口尺寸可能仍是旧值。
+    // 偏移与裁剪统一在 OverlayRoot.onLayout 中按本次提交的窗口框计算。
     private void layoutUnityView() {
         if (unityView == null || floatView == null || windowParams == null) {
             return;
         }
 
-        if (floatView.isAttachedToWindow()) {
-            floatView.getLocationOnScreen(screenLoc);
-        } else {
-            screenLoc[0] = windowParams.x;
-            screenLoc[1] = windowParams.y;
-        }
-        int left = -screenLoc[0];
-        int top = -screenLoc[1];
-
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) unityView.getLayoutParams();
-        if (lp == null) {
+        if (lp == null || lp.width != displayWidth || lp.height != displayHeight) {
             lp = new FrameLayout.LayoutParams(displayWidth, displayHeight);
-        }
-        lp.width = displayWidth;
-        lp.height = displayHeight;
-        lp.leftMargin = left;
-        lp.topMargin = top;
-        lp.gravity = Gravity.TOP | Gravity.START;
-        unityView.setLayoutParams(lp);
-
-        if (gestureActive || petRect.isEmpty()) {
-            unityView.setClipBounds(null);
-        } else {
-            int w = Math.max(1, floatView.getWidth());
-            int h = Math.max(1, floatView.getHeight());
-            // 【关键修复】：clipBounds 必须使用 unityView 的相对局部坐标，即 (screenLoc[0], screenLoc[1]) 对应的偏移量
-            unityView.setClipBounds(new Rect(-left, -top, -left + w, -top + h));
+            lp.gravity = Gravity.TOP | Gravity.START;
+            unityView.setLayoutParams(lp);
         }
         floatView.requestLayout();
     }
@@ -507,33 +504,119 @@ public class PetFloatService extends Service {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         refreshDisplaySize();
-        if (!gestureActive && lastX != Integer.MIN_VALUE) {
+        if (fullScreenGesture) {
+            floatView.fullScreenLayoutReady = false;
+            commitWindowFrame(0, 0, displayWidth, displayHeight, true);
+        } else if (lastX != Integer.MIN_VALUE) {
             applyTouchArea(lastX, lastY, lastW, lastH, lastUnityW, lastUnityH);
-        } else {
-            layoutUnityView();
         }
+        layoutUnityView();
     }
 
     private final class OverlayRoot extends FrameLayout {
+        private final ArrayDeque<MotionEvent> deferredTouchEvents = new ArrayDeque<>();
+        private final int dragSlop;
+        private float downRawX;
+        private float downRawY;
+        private boolean fullScreenLayoutReady;
+        private boolean flushPosted;
+
         OverlayRoot() {
             super(PetFloatService.this);
+            setMotionEventSplittingEnabled(false);
+            // 提前于 Unity 的拖动阈值准备窗口，微小点击抖动仍不扩窗。
+            dragSlop = Math.max(1, Math.min(
+                    ViewConfiguration.get(PetFloatService.this).getScaledTouchSlop(),
+                    WINDOW_PAD / 4));
         }
 
         @Override
         public boolean dispatchTouchEvent(MotionEvent ev) {
             int action = ev.getActionMasked();
-            if (action == MotionEvent.ACTION_DOWN && !gestureActive) {
-                setGestureActive(true);
+            if (action == MotionEvent.ACTION_DOWN) {
+                MAIN.removeCallbacks(endGestureRunnable);
+                gestureActive = true;
+                downRawX = ev.getRawX();
+                downRawY = ev.getRawY();
+            }
+            if (action != MotionEvent.ACTION_MOVE) traceInput("receive " + ev);
+            if (unityView == null) {
+                gestureActive = false;
+                return false;
+            }
+
+            // Unity 的视口始终覆盖整屏。直接送入屏幕坐标，避免父窗口重布局
+            // 期间的旧 child.left/top 把静止手指变成一次虚假的拖动。
+            MotionEvent screenEvent = MotionEvent.obtain(ev);
+            screenEvent.offsetLocation(ev.getRawX() - ev.getX(), ev.getRawY() - ev.getY());
+
+            float dx = ev.getRawX() - downRawX;
+            float dy = ev.getRawY() - downRawY;
+            boolean moved = dx * dx + dy * dy >= dragSlop * dragSlop;
+            if (gestureActive && !fullScreenGesture
+                    && (action == MotionEvent.ACTION_POINTER_DOWN
+                    || ((action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP)
+                    && moved))) {
+                fullScreenGesture = true;
+                fullScreenLayoutReady = false;
+                refreshDisplaySize();
+                commitWindowFrame(0, 0, displayWidth, displayHeight, true);
+                // 模型切换的过渡区域可能已是全屏，commitWindowFrame 会跳过相同参数。
+                // 仍需请求一次布局以更新 ready 并发送暂存事件，避免 UP/CANCEL 永久滞留。
+                layoutUnityView();
+                traceInput("prepare-full-screen");
+            }
+
+            if (fullScreenGesture && (!fullScreenLayoutReady || flushPosted)) {
+                // 窗口还没铺满时不能先让 Unity 移动，否则第一帧快速拖动仍会被裁剪。
+                // 连续 MOVE 只保留最新位置；多指按下/抬起等事件保持顺序。
+                MotionEvent previous = deferredTouchEvents.peekLast();
+                if (action == MotionEvent.ACTION_MOVE && previous != null
+                        && previous.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                    deferredTouchEvents.removeLast().recycle();
+                }
+                deferredTouchEvents.addLast(screenEvent);
+                return true;
+            }
+            return dispatchScreenTouchEvent(screenEvent);
+        }
+
+        private boolean dispatchScreenTouchEvent(MotionEvent screenEvent) {
+            int action = screenEvent.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                MAIN.removeCallbacks(endGestureRunnable);
+                gestureActive = true;
             }
             boolean handled;
+            long started = System.nanoTime();
             try {
-                handled = super.dispatchTouchEvent(ev);
+                handled = unityView.dispatchTouchEvent(screenEvent);
+                if (action != MotionEvent.ACTION_MOVE || !handled) {
+                    traceInput("forward action=" + action + " handled=" + handled);
+                }
             } finally {
+                long elapsedMs = (System.nanoTime() - started) / 1000000;
+                if (elapsedMs >= 100) traceInput("slow-forward ms=" + elapsedMs);
+                screenEvent.recycle();
                 if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                    MAIN.post(() -> setGestureActive(false));
+                    MAIN.post(endGestureRunnable);
                 }
             }
             return handled;
+        }
+
+        private void flushDeferredTouchEvents() {
+            flushPosted = false;
+            if (!fullScreenLayoutReady || unityView == null) return;
+            traceInput("flush-touch");
+            while (!deferredTouchEvents.isEmpty()) {
+                dispatchScreenTouchEvent(deferredTouchEvents.removeFirst());
+            }
+        }
+
+        private void recycleDeferredTouchEvents() {
+            while (!deferredTouchEvents.isEmpty()) deferredTouchEvents.removeFirst().recycle();
+            flushPosted = false;
         }
 
         @Override
@@ -548,23 +631,35 @@ public class PetFloatService extends Service {
             }
         }
 
-        // 【修改点 3】：修正 OverlayRoot.onLayout 中的 clipBounds
         @Override
         protected void onLayout(boolean changed, int l, int t, int r, int b) {
             if (unityView == null) {
                 return;
             }
-            int[] loc = new int[2];
-            getLocationOnScreen(loc);
-            int x = -loc[0];
-            int y = -loc[1];
+            long started = System.nanoTime();
+            boolean wasReady = fullScreenLayoutReady;
+            // getLocationOnScreen 在窗口移动的这次 onLayout 中也可能还是旧值。
+            // 窗口使用 TOP|START、fitInsets=0、NO_LIMITS，按提交坐标与父窗同步补偿。
+            int x = -windowParams.x;
+            int y = -windowParams.y;
             unityView.layout(x, y, x + displayWidth, y + displayHeight);
 
-            if (gestureActive || petRect.isEmpty()) {
+            boolean coversScreen = fullScreenGesture
+                    && r - l >= displayWidth && b - t >= displayHeight;
+            if (coversScreen || petRect.isEmpty()) {
                 unityView.setClipBounds(null);
             } else {
-                // 使用相对局部坐标 (-x, -y)
+                // clipBounds 使用 Unity 视图的局部坐标，和偏移在同一次布局中更新。
                 unityView.setClipBounds(new Rect(-x, -y, -x + (r - l), -y + (b - t)));
+            }
+            fullScreenLayoutReady = coversScreen;
+            if (!wasReady && coversScreen) traceInput("viewport-ready");
+            long elapsedMs = (System.nanoTime() - started) / 1000000;
+            if (elapsedMs >= 100) traceInput("slow-layout ms=" + elapsedMs);
+            if (fullScreenLayoutReady && !deferredTouchEvents.isEmpty() && !flushPosted) {
+                // 等本次布局/绘制遍历结束后再交给 Unity，避免旧 Surface 裁剪第一帧。
+                flushPosted = true;
+                MAIN.post(this::flushDeferredTouchEvents);
             }
         }
     }
@@ -577,7 +672,6 @@ public class PetFloatService extends Service {
             SurfaceView surfaceView = (SurfaceView) view;
             surfaceView.setZOrderOnTop(false);
             surfaceView.setZOrderMediaOverlay(true);
-//            surfaceView.setZOrderOnTop(true); // 独立图层，屏幕位置恒为 (0,0)
             surfaceView.getHolder().setFormat(PixelFormat.TRANSLUCENT);
         }
 
@@ -624,6 +718,7 @@ public class PetFloatService extends Service {
         super.onDestroy();
         sInstance = null;
         MAIN.removeCallbacksAndMessages(null);
+        if (floatView != null) floatView.recycleDeferredTouchEvents();
         try {
             if (mUnityPlayer != null) {
                 Class<?> clazz = mUnityPlayer.getClass();
