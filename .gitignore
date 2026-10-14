@@ -1,0 +1,69 @@
+# Android and Gradle templates:
+# https://github.com/github/gitignore/blob/main/Android.gitignore
+# https://github.com/github/gitignore/blob/main/Gradle.gitignore
+
+# Gradle caches and generated build outputs
+.gradle/
+.kotlin/
+**/build/
+# Unity exports IL2CPP compiler tools under src/.../build/deploy.
+# Keep build directories that form part of the source tree.
+!**/src/**/build/
+gradle-app.setting
+.gradletasknamecache
+
+# Keep Gradle wrapper files
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# Local SDK/NDK paths and machine configuration
+local.properties
+
+# Android Studio and IntelliJ generated files
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+misc.xml
+deploymentTargetDropDown.xml
+render.experimental.xml
+
+# Other IDE caches and personal files
+.vscode/
+.vs/
+.project
+.classpath
+*.user
+*.suo
+*.swp
+*.swo
+*~
+
+# Android packages, profiling data, and logs
+*.apk
+*.aab
+*.ap_
+output-metadata.json
+*.hprof
+*.log
+
+# Unity-generated debug data for the exported Android project
+*_BurstDebugInformation_DoNotShip/
+/unityLibrary/symbols/
+*.sym.so
+*.dbg.so
+
+# Signing keys, local environment files, and service configuration
+*.jks
+*.keystore
+.env
+.env.*
+!.env.example
+!.env.sample
+google-services.json
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
