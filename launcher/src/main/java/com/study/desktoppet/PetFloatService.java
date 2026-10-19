@@ -63,6 +63,9 @@ public class PetFloatService extends Service {
     private OverlayRoot floatView;
     private View unityView;
     private WindowManager.LayoutParams windowParams;
+    private PetOptionsMenu optionsMenu;
+    // Session setting: every fresh service starts with sound on; model changes keep this value.
+    private volatile boolean petMuted;
 
     private int displayWidth;
     private int displayHeight;
@@ -95,8 +98,8 @@ public class PetFloatService extends Service {
                 + windowParams.y + "," + windowParams.width + "," + windowParams.height));
     }
 
-    private static final int WINDOW_PAD = 64;
-    private static final int STABLE_SLACK = 32;
+    private static final int WINDOW_PAD = 48;
+    private static final int STABLE_SLACK = 16;
 
     @Override
     public void onCreate() {
@@ -276,6 +279,48 @@ public class PetFloatService extends Service {
 
     public static void clearPetTouchArea() {
         updatePetTouchArea(0, 0, 0, 0, 0, 0);
+    }
+
+    public static boolean isPetMuted() {
+        PetFloatService service = sInstance;
+        return service != null && service.petMuted;
+    }
+
+    /** Called after Unity confirms a three-second stationary press actually hit the pet. */
+    public static void showPetOptionsMenu(int x, int y, int unityW, int unityH) {
+        PetFloatService service = sInstance;
+        if (service == null) return;
+        MAIN.post(() -> {
+            if (sInstance != service || !service.unityReady || !service.windowOnScreen) return;
+            service.refreshDisplaySize();
+            int screenX = unityW > 0 ? Math.round(x * (service.displayWidth / (float) unityW)) : x;
+            int screenY = unityH > 0 ? Math.round(y * (service.displayHeight / (float) unityH)) : y;
+            if (service.optionsMenu == null) {
+                service.optionsMenu = new PetOptionsMenu(service, service.windowManager,
+                        () -> service.petMuted, service::setPetMuted);
+            }
+            try {
+                service.optionsMenu.show(screenX, screenY, service.displayWidth, service.displayHeight);
+            } catch (Exception exception) {
+                Log.w(TAG, "Could not open pet options", exception);
+            }
+        });
+    }
+
+    private boolean setPetMuted(boolean muted) {
+        if (!unityReady || mUnityPlayer == null) return false;
+        boolean previous = petMuted;
+        petMuted = muted;
+        try {
+            Class.forName("com.unity3d.player.UnityPlayer")
+                    .getMethod("UnitySendMessage", String.class, String.class, String.class)
+                    .invoke(null, "__DesktopPetAudioSettings", "SetMuted", muted ? "true" : "false");
+            return true;
+        } catch (Exception exception) {
+            petMuted = previous;
+            Log.w(TAG, "Could not change pet audio", exception);
+            return false;
+        }
     }
 
     private void queueTouchArea(
@@ -503,6 +548,7 @@ public class PetFloatService extends Service {
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        if (optionsMenu != null) optionsMenu.dismiss();
         refreshDisplaySize();
         if (fullScreenGesture) {
             floatView.fullScreenLayoutReady = false;
@@ -716,6 +762,7 @@ public class PetFloatService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        if (optionsMenu != null) optionsMenu.dismiss();
         sInstance = null;
         MAIN.removeCallbacksAndMessages(null);
         if (floatView != null) floatView.recycleDeferredTouchEvents();
