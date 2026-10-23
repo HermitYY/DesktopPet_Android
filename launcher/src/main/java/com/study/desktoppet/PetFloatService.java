@@ -64,6 +64,7 @@ public class PetFloatService extends Service {
     private View unityView;
     private WindowManager.LayoutParams windowParams;
     private PetOptionsMenu optionsMenu;
+    private PetAccessoryState accessoryState = PetAccessoryState.DISABLED;
     // Session setting: every fresh service starts with sound on; model changes keep this value.
     private volatile boolean petMuted;
 
@@ -98,8 +99,8 @@ public class PetFloatService extends Service {
                 + windowParams.y + "," + windowParams.width + "," + windowParams.height));
     }
 
-    private static final int WINDOW_PAD = 48;
-    private static final int STABLE_SLACK = 16;
+    private static final int WINDOW_PAD = 60;
+    private static final int STABLE_SLACK = 24;
 
     @Override
     public void onCreate() {
@@ -286,6 +287,21 @@ public class PetFloatService extends Service {
         return service != null && service.petMuted;
     }
 
+    /** Unity publishes both the available accessories and actual checked states on its game thread. */
+    public static void updatePetAccessories(String json) {
+        PetFloatService service = sInstance;
+        if (service == null) return;
+        MAIN.post(() -> {
+            if (sInstance != service) return;
+            try {
+                service.accessoryState = PetAccessoryState.fromJson(json);
+                if (service.optionsMenu != null) service.optionsMenu.refreshAccessories();
+            } catch (Exception exception) {
+                Log.w(TAG, "Could not read accessory settings", exception);
+            }
+        });
+    }
+
     /** Called after Unity confirms a three-second stationary press actually hit the pet. */
     public static void showPetOptionsMenu(int x, int y, int unityW, int unityH) {
         PetFloatService service = sInstance;
@@ -297,7 +313,8 @@ public class PetFloatService extends Service {
             int screenY = unityH > 0 ? Math.round(y * (service.displayHeight / (float) unityH)) : y;
             if (service.optionsMenu == null) {
                 service.optionsMenu = new PetOptionsMenu(service, service.windowManager,
-                        () -> service.petMuted, service::setPetMuted);
+                        () -> service.petMuted, service::setPetMuted,
+                        () -> service.accessoryState, service::setPetAccessory);
             }
             try {
                 service.optionsMenu.show(screenX, screenY, service.displayWidth, service.displayHeight);
@@ -305,6 +322,22 @@ public class PetFloatService extends Service {
                 Log.w(TAG, "Could not open pet options", exception);
             }
         });
+    }
+
+    private boolean setPetAccessory(String session, int slot, int item, boolean selected) {
+        if (!unityReady || mUnityPlayer == null || !accessoryState.enabled
+                || !accessoryState.session.equals(session) || accessoryState.findItem(slot, item) == null) return false;
+        try {
+            String command = new org.json.JSONObject().put("session", session).put("slot", slot)
+                    .put("item", item).put("selected", selected).toString();
+            Class.forName("com.unity3d.player.UnityPlayer")
+                    .getMethod("UnitySendMessage", String.class, String.class, String.class)
+                    .invoke(null, "__DesktopPetAccessories", "SetAccessorySelection", command);
+            return true;
+        } catch (Exception exception) {
+            Log.w(TAG, "Could not change pet accessory", exception);
+            return false;
+        }
     }
 
     private boolean setPetMuted(boolean muted) {

@@ -15,7 +15,7 @@ android {
     }
 
     defaultConfig {
-        applicationId "com.study.desktoppetYJS"
+        applicationId "com.study.desktoppetHSL"
         versionName "0.3.0"
         minSdkVersion 26
         targetSdkVersion 33
@@ -54,7 +54,7 @@ android {
         }
     }
 
-    namespace "com.study.desktoppetYJS"
+    namespace "com.study.desktoppetHSL"
 
     bundle {
         language {

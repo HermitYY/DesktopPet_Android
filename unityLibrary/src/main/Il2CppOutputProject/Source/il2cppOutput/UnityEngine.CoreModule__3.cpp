@@ -746,6 +746,9 @@ struct SceneManager_tA0EF56A88ACA4A15731AF7FDC10A869FA4C698FA  : public RuntimeO
 struct SceneManagerAPI_t9F40646DDC167DB7D66499DE8E0E4C1776D75169  : public RuntimeObject
 {
 };
+struct SplashScreen_t7CCA1F303C074EB0781069A631E5D5F8C923F9CC  : public RuntimeObject
+{
+};
 struct String_t  : public RuntimeObject
 {
 	int32_t ____stringLength;
@@ -30489,6 +30492,23 @@ IL2CPP_EXTERN_C IL2CPP_METHOD_ATTR void CommandBufferExtensions_Internal_SwitchO
 	if (!_il2cpp_icall_func)
 	_il2cpp_icall_func = (CommandBufferExtensions_Internal_SwitchOutOfFastMemory_Injected_m34BF1556605276E3EB845C2D5F6DC29DE13B3931_ftn)il2cpp_codegen_resolve_icall ("UnityEngine.Rendering.CommandBufferExtensions::Internal_SwitchOutOfFastMemory_Injected(System.IntPtr,UnityEngine.Rendering.RenderTargetIdentifier&,System.Boolean)");
 	_il2cpp_icall_func(___0_cmd, ___1_rt, ___2_copyContents);
+}
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
+#pragma clang diagnostic ignored "-Wunused-variable"
+#endif
+IL2CPP_EXTERN_C IL2CPP_METHOD_ATTR bool SplashScreen_get_isFinished_m60A9E6ED04B2E64E51B7E698B8524B510452662F (const RuntimeMethod* method) 
+{
+	typedef bool (*SplashScreen_get_isFinished_m60A9E6ED04B2E64E51B7E698B8524B510452662F_ftn) ();
+	static SplashScreen_get_isFinished_m60A9E6ED04B2E64E51B7E698B8524B510452662F_ftn _il2cpp_icall_func;
+	if (!_il2cpp_icall_func)
+	_il2cpp_icall_func = (SplashScreen_get_isFinished_m60A9E6ED04B2E64E51B7E698B8524B510452662F_ftn)il2cpp_codegen_resolve_icall ("UnityEngine.Rendering.SplashScreen::get_isFinished()");
+	bool icallRetVal = _il2cpp_icall_func();
+	return icallRetVal;
 }
 #ifdef __clang__
 #pragma clang diagnostic pop
